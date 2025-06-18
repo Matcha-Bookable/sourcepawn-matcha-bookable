@@ -6,7 +6,6 @@
 #include <SteamWorks>
 #include <dbi>
 #include <morecolors>
-#include <env_variables>
 
 // External natives
 #include <logstf>
