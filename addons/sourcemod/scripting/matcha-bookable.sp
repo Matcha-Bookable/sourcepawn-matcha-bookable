@@ -19,7 +19,7 @@
 #define MAX_AFK_TIME 600.0
 #define MAX_SDR_RETRIES 10
 
-// Matcha API endpoints
+// Matcha API endpoints (instance only)
 #define API_UPLOADSERVERINFO_URL ""
 #define API_UPDATESERVERSTATUS_URL ""
 #define API_UPLOADPLAYERSINFO_URL ""
@@ -99,12 +99,13 @@ public void OnPluginStart() {
 }
 
 public void OnMapStart() {
-    UploadMapInfo();
+    if (g_publicIP[0] != '\0') {
+        UploadMapInfo();
+    }
 }
 
 public void OnClientConnected() {
     g_playercount++;
-    CapturePlayerCount(); // Update count
     SetAFKTimer();
 }
 
@@ -117,7 +118,6 @@ public void OnClientPostAdminCheck(int client){
 
 public void OnClientDisconnect(){
     g_playercount--;
-    CapturePlayerCount(); // Update count
     SetAFKTimer();
 }
 
@@ -288,6 +288,20 @@ void GetCvar() {
     
     // Current Players
     g_playercount = GetClientCount();
+
+    // Debug
+    // PrintToServer("[MatchaAPI] Current server details:");
+    // PrintToServer("[MatchaAPI] Hostname: %s", g_hostname);
+    // PrintToServer("[MatchaAPI] Map: %s", g_mapname);
+    // PrintToServer("[MatchaAPI] Public IP: %s", g_publicIP);
+    // PrintToServer("[MatchaAPI] SDR IP: %s", g_sdrIP);
+    // PrintToServer("[MatchaAPI] Public Port: %d", g_publicPort);
+    // PrintToServer("[MatchaAPI] SDR Port: %d", g_sdrPort);
+    // PrintToServer("[MatchaAPI] RCON Port: %d", g_rconPort);
+    // PrintToServer("[MatchaAPI] STV Port: %d", g_stvPort);
+    // PrintToServer("[MatchaAPI] SV Password: %s", g_svpassword);
+    // PrintToServer("[MatchaAPI] RCON Password: %s", g_rconpassword);
+    // PrintToServer("[MatchaAPI] Player Count: %d", g_playercount);
 }
 
 public Action WaitForSteamInfo(Handle timer, int retry){
@@ -295,12 +309,14 @@ public Action WaitForSteamInfo(Handle timer, int retry){
 
     if (g_adrFakeIP && g_adrFakePorts && gotIP){
         PrintToServer("[MatchaAPI] All conditions met, uploading server details (SDR=1) and updating status (START).");
-        UploadServerDetails(1);
+        GetCvar();
         UpdateServerStatus(API_START);
+        UploadServerDetails(1);
         return Plugin_Stop;
     }
     else if (retry == MAX_SDR_RETRIES){
         PrintToServer("[MatchaAPI] Max SDR retries reached, uploading server details (SDR=0).");
+        GetCvar();
         UploadServerDetails(0);
         return Plugin_Stop;
     }
@@ -331,7 +347,7 @@ void SendPlayerInfo(int client) {
     GetClientIP(client, ipv4, sizeof(ipv4));
 
     JSONObject requestformat = new JSONObject();
-    requestformat.SetInt("port", g_publicPort);
+    requestformat.SetString("address", g_publicIP);
     requestformat.SetString("steamid2", sid2);
     requestformat.SetString("steamid3", sid3);
     requestformat.SetString("username", username);
@@ -353,10 +369,15 @@ void SendPlayerInfo(int client) {
     Endpoint: instance/uploadserverinfo
 */
 void UploadMapInfo() {
+    GetCvar();
     GetCurrentMap(g_mapname, sizeof(g_mapname));
+
+    // debug
+    PrintToServer("[MatchaAPI] Uploading map info...");
 
     // Upload Map name
     JSONObject requestformat = new JSONObject();
+    requestformat.SetString("address", g_publicIP);
     requestformat.SetString("map", g_mapname);
 
     HTTPRequest request = new HTTPRequest(API_UPLOADSERVERINFO_URL);
@@ -371,26 +392,11 @@ void UploadMapInfo() {
 /*
     Endpoint: instance/uploadserverinfo
 */
-void CapturePlayerCount() {
-    // Upload player count
-    JSONObject requestformat = new JSONObject();
-    requestformat.SetInt("players", g_playercount);
-
-    HTTPRequest request = new HTTPRequest(API_UPLOADSERVERINFO_URL);
-    request.SetHeader("Authorization", "Bearer %s", API_SECRET_KEY); // Need api key to be authorized
-    request.SetHeader("Content-Type", "application/json");
-    request.Post(requestformat, HandleRequest);
-
-    delete requestformat;
-}
-
-/*
-    Endpoint: instance/uploadserverinfo
-*/
 void UploadServerDetails(int sdr) {
-    GetCvar(); // Update the CVAR to latest information
-
     JSONObject requestformat = new JSONObject();
+
+    // debug
+    PrintToServer("[MatchaAPI] Uploading server details...");
 
     // 1 = sdr, 0 = no sdr
     if (sdr) {
@@ -399,7 +405,7 @@ void UploadServerDetails(int sdr) {
     }
 
     requestformat.SetString("hostname", g_hostname);
-    requestformat.SetInt("port", g_publicPort);
+    requestformat.SetString("address", g_publicIP);
     requestformat.SetInt("stv_port", g_stvPort);
     requestformat.SetInt("rcon_port", g_rconPort);
     requestformat.SetString("sv_password", g_svpassword);
@@ -423,8 +429,11 @@ void UploadServerDetails(int sdr) {
     Endpoint: instance/updateserverstatus
 */
 void UpdateServerStatus(int status) {
+    // debug
+    PrintToServer("[MatchaAPI] Updating server status...");
+
     JSONObject requestformat = new JSONObject();
-    requestformat.SetInt("port", g_publicPort);
+    requestformat.SetString("address", g_publicIP);
     requestformat.SetInt("status", status);
 
     char jsonBuffer[256];
@@ -445,7 +454,10 @@ void UpdateServerStatus(int status) {
 void SendGamesInfo(int logid, const char[] logurl, int demoid, const char[] demourl) {
     JSONObject requestformat = new JSONObject();
     
-    requestformat.SetInt("port", g_publicPort);
+    // debug
+    PrintToServer("[MatchaAPI] Sending game info...");
+
+    requestformat.SetString("address", g_publicIP);
 
     // logid is the PK, therefore must be valid
     requestformat.SetInt("logid", logid);
@@ -471,6 +483,11 @@ void SendGamesInfo(int logid, const char[] logurl, int demoid, const char[] demo
 void HandleRequest(HTTPResponse response, any value) {
     if (response.Status != HTTPStatus_OK) {
         PrintToServer("[MatchaAPI] HTTP Request failed with status %d", response.Status);
+        JSONObject error = view_as<JSONObject>(response.Data);
+
+        char errorstring[256];
+        error.GetString("error", errorstring, sizeof(errorstring));
+        PrintToServer("[MatchaAPI] Error: %s", errorstring);
         return;
     }
 
