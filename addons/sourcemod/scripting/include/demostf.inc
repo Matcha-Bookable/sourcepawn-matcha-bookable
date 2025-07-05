@@ -3,4 +3,4 @@
 #endif
 #define _demostf_included
 
-forward DemoUploaded(bool success, const char[] demoid, const char[] url);
+forward void DemoUploaded(bool success, const char[] demoid, const char[] url);

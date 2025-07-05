@@ -2,10 +2,10 @@
 #pragma newdecls required
 
 #include <sourcemod>
-#include <ripext>
 #include <SteamWorks>
 #include <dbi>
 #include <morecolors>
+#include <anyhttp> // Thank you f2
 
 // External natives
 #include <logstf>
@@ -17,7 +17,7 @@
 
 #define MAX_AFK_PLAYERS 2
 #define MAX_AFK_TIME 600.0
-#define MAX_SDR_RETRIES 10
+#define MAX_SDR_RETRIES 30
 
 // Matcha API endpoints (instance only)
 #define API_UPLOADSERVERINFO_URL ""
@@ -33,23 +33,22 @@
 /*
     Global Variables
 */
+int g_retry = 0;
+
 char g_hostname[NAME_LENGTH];
 char g_mapname[MAX_BUFFER_LENGTH];
-int g_playercount;
+int g_playerCount;
 
 char g_publicIP[IP_LENGTH];
 char g_sdrIP[IP_LENGTH];
 
 int g_publicPort;
-int g_sdrPort;
+char g_sdrPort[6];
 int g_rconPort;
 int g_stvPort;
 
 char g_svpassword[PASSWORD_LENGTH + 1];
 char g_rconpassword[PASSWORD_LENGTH + 1];
-
-Address g_adrFakeIP;
-Address g_adrFakePorts;
 
 Handle g_hAFKTimer;
 
@@ -61,8 +60,8 @@ bool g_bDemoUploaded = false;
 bool g_bLogRecentlyFailed = false;
 bool g_bDemoRecentlyFailed = false;
 
-int g_LogID;
-int g_DemoID;
+char g_LogID[16];
+char g_DemoID[16];
 
 char g_LogURL[128];
 char g_DemoURL[256];
@@ -79,7 +78,7 @@ public Plugin myinfo =
     name = "Matcha Bookable",
     author = "avan & aqua",
     description = "Management of Matcha Bookable Servers",
-    version = "0.1.2",
+    version = "0.1.3",
     url = "https://discord.gg/8ysCuREbWQ"
 };
 
@@ -88,14 +87,13 @@ public Plugin myinfo =
 */
 public void OnPluginStart() {
     // Preparation
-    GetAddresses(); // For SDR
     GeneratePasswords(); // Create passwords
 
     // Commands
     RegConsoleCmd("sm_sdr", CMD_SdrRequest, "Output the SDR string"); // SDR command
 
     // Final
-    CreateTimer(5.0, WaitForSteamInfo, 0, TIMER_REPEAT);
+    CreateTimer(10.0, WaitForSteamInfo, 0, TIMER_REPEAT);
 }
 
 public void OnMapStart() {
@@ -105,7 +103,7 @@ public void OnMapStart() {
 }
 
 public void OnClientConnected() {
-    g_playercount++;
+    g_playerCount++;
     SetAFKTimer();
 }
 
@@ -113,15 +111,21 @@ public void OnClientConnected() {
     Incrementing playercount here causes inaccuracy, if client crashes while loading playercount would get incremented but not decremented
 */
 public void OnClientPostAdminCheck(int client){
+    if (!IsRealPlayer(client)) {
+        return; // fake client
+    }
+    
     SendPlayerInfo(client); // Send info
 }
 
 public void OnClientDisconnect(){
-    g_playercount--;
+    g_playerCount--;
     SetAFKTimer();
 }
 
 public Action OnServerEmpty(Handle timer){
+    MC_PrintToChatAll("{red}-- SERVER IS EMPTY, INSTANCE TERMINATING --");
+    PrintToServer("-- Server is empty --");
     UpdateServerStatus(API_STOP); // Call the url when empty
     g_hAFKTimer = INVALID_HANDLE; // Destroy timer
     return Plugin_Stop;
@@ -143,16 +147,16 @@ public void LogUploaded(bool success, const char[] logid, const char[] url) {
 
     g_bLogUploaded = true;
     g_bLogRecentlyFailed = false;
-    g_LogID = StringToInt(logid, 10);
-    strcopy(g_LogURL, sizeof(g_LogURL), url);
+    strcopy(g_LogID, sizeof(g_LogID), logid);
 
     if (g_bDemoRecentlyFailed) { // Demo attempted but failed 
-        SendGamesInfo(g_LogID, g_LogURL, -1, "");
+        SendGamesInfo(g_LogID, g_LogURL, _, "");
         resetLogAndDemoStatus();        
     }
 
     if (g_bLogUploaded && g_bDemoUploaded) { // Both successfully uploaded
-        g_bLogUploaded, g_bDemoUploaded = false;
+        g_bLogUploaded = false;
+        g_bDemoUploaded = false;
 
         SendGamesInfo(g_LogID, g_LogURL, g_DemoID, g_DemoURL);   
         resetLogAndDemoStatus();
@@ -165,7 +169,7 @@ public void LogUploaded(bool success, const char[] logid, const char[] url) {
     Calls when demos are uploaded or failed to upload (DEMOS.TF)
     Requires at least 5 minutes of recordings
 */
-public int DemoUploaded(bool success, const char[] demoid, const char[] url) {
+public void DemoUploaded(bool success, const char[] demoid, const char[] url) {
     if (g_bLogRecentlyFailed && g_bDemoRecentlyFailed) { // if both failed recently
         resetLogAndDemoStatus();
     }
@@ -176,12 +180,12 @@ public int DemoUploaded(bool success, const char[] demoid, const char[] url) {
 
         // Give it 3 minutes for timeout
         CreateTimer(180.0, Timer_DemoUploadHandle, _);
-        return 0;
+        return;
     }
 
     g_bDemoUploaded = true;
     g_bDemoRecentlyFailed = false;
-    g_DemoID = StringToInt(demoid, 10);
+    strcopy(g_DemoID, sizeof(g_DemoID), demoid); 
     strcopy(g_DemoURL, sizeof(g_DemoURL), url);
 
     if (g_bLogRecentlyFailed) { // Logstf attempted but failed
@@ -193,13 +197,14 @@ public int DemoUploaded(bool success, const char[] demoid, const char[] url) {
     }
 
     if (g_bLogUploaded && g_bDemoUploaded) {
-        g_bLogUploaded, g_bDemoUploaded = false;
+        g_bLogUploaded = false;
+        g_bDemoUploaded = false;
 
         SendGamesInfo(g_LogID, g_LogURL, g_DemoID, g_DemoURL);
         resetLogAndDemoStatus();
     }
 
-    return 0;
+    return;
 }
 
 /*
@@ -219,14 +224,14 @@ public Action Timer_DemoUploadHandle(Handle timer) {
 */
 public Action CMD_SdrRequest(int client, int args) {
     // If no SDR
-    if (!GetPublicIP(g_publicIP, sizeof(g_publicIP))) {
+    if (StrEqual(g_sdrIP, "?.?.?.?")) {
         MC_PrintToChat(client, 
         "{aqua}No SDR detected on this server.");
         return Plugin_Handled;
     }
 
     MC_PrintToChat(client, 
-    "{aqua}connect %s:%d; password \"%s\"", g_sdrIP, g_sdrPort, g_svpassword);
+    "{aqua}connect %s:%s", g_sdrIP, g_sdrPort);
     return Plugin_Handled;
 }
 
@@ -234,6 +239,7 @@ public Action CMD_SdrRequest(int client, int args) {
     Generate passwords for server and rcon then apply them
 */
 void GeneratePasswords() {
+    PrintToServer("[MatchaAPI] Generating passwords...");
     ConVar svPassword;
     ConVar rconPassword;
 
@@ -248,19 +254,7 @@ void GeneratePasswords() {
 
     ServerCommand("sv_password %s", g_svpassword);
     ServerCommand("rcon_password %s", g_rconpassword);
-}
-
-/*
-    Loads the addresses for SDR
-*/
-void GetAddresses() {
-    Handle GameConfig;
-    // Load the address file
-    GameConfig = LoadGameConfigFile("matcha-bookable"); // addresses
-
-    // Addresses of SDR (not actual IPs)
-    g_adrFakeIP = GameConfGetAddress(GameConfig, "g_nFakeIP");
-    g_adrFakePorts = GameConfGetAddress(GameConfig, "g_arFakePorts");
+    PrintToServer("[MatchaAPI] Passwords changed.");
 }
 
 /*
@@ -276,53 +270,43 @@ void GetCvar() {
 
     // IP Addresses
     GetPublicIP(g_publicIP, sizeof(g_publicIP));
-    GetFakeIP(g_sdrIP, sizeof(g_sdrIP));
+
+    // SDR
+    GetFakeIP(g_sdrIP, sizeof(g_sdrIP), g_sdrPort, sizeof(g_sdrPort));
 
     // Respective port
     g_publicPort = GetConVarInt(FindConVar("hostport"));
-    g_sdrPort = GetFakePort(0);
     g_rconPort= g_publicPort; // assume its the same (99% of the time)
     g_stvPort = GetConVarInt(FindConVar("tv_port"));
-    
-    // Passwords already applied
-    
-    // Current Players
-    g_playercount = GetClientCount();
-
-    // Debug
-    // PrintToServer("[MatchaAPI] Current server details:");
-    // PrintToServer("[MatchaAPI] Hostname: %s", g_hostname);
-    // PrintToServer("[MatchaAPI] Map: %s", g_mapname);
-    // PrintToServer("[MatchaAPI] Public IP: %s", g_publicIP);
-    // PrintToServer("[MatchaAPI] SDR IP: %s", g_sdrIP);
-    // PrintToServer("[MatchaAPI] Public Port: %d", g_publicPort);
-    // PrintToServer("[MatchaAPI] SDR Port: %d", g_sdrPort);
-    // PrintToServer("[MatchaAPI] RCON Port: %d", g_rconPort);
-    // PrintToServer("[MatchaAPI] STV Port: %d", g_stvPort);
-    // PrintToServer("[MatchaAPI] SV Password: %s", g_svpassword);
-    // PrintToServer("[MatchaAPI] RCON Password: %s", g_rconpassword);
-    // PrintToServer("[MatchaAPI] Player Count: %d", g_playercount);
 }
 
 public Action WaitForSteamInfo(Handle timer, int retry){
     bool gotIP = GetPublicIP(g_publicIP, sizeof(g_publicIP));
+    bool gotFakeIP = GetFakeIP(g_sdrIP, sizeof(g_sdrIP), g_sdrPort, sizeof(g_sdrPort));
+    
+    g_playerCount = GetPlayerCount();
 
-    if (g_adrFakeIP && g_adrFakePorts && gotIP){
+    if (gotIP && gotFakeIP){
         PrintToServer("[MatchaAPI] All conditions met, uploading server details (SDR=1) and updating status (START).");
         GetCvar();
         UpdateServerStatus(API_START);
         UploadServerDetails(1);
+        SetAFKTimer();
+        
         return Plugin_Stop;
     }
-    else if (retry == MAX_SDR_RETRIES){
+    else if (g_retry == MAX_SDR_RETRIES){
         PrintToServer("[MatchaAPI] Max SDR retries reached, uploading server details (SDR=0).");
         GetCvar();
         UploadServerDetails(0);
+        SetAFKTimer();
+        
         return Plugin_Stop;
     }
     else{
-        PrintToServer("[MatchaAPI] Retrying... (%d/%d)", retry, MAX_SDR_RETRIES);
-        retry++;
+        PrintToServer("[MatchaAPI] Retrying... (%d/%d)", g_retry, MAX_SDR_RETRIES);
+        g_retry++;
+        
         return Plugin_Continue;
     }
 }
@@ -346,23 +330,16 @@ void SendPlayerInfo(int client) {
     char ipv4[IP_LENGTH];
     GetClientIP(client, ipv4, sizeof(ipv4));
 
-    JSONObject requestformat = new JSONObject();
-    requestformat.SetString("address", g_publicIP);
-    requestformat.SetString("steamid2", sid2);
-    requestformat.SetString("steamid3", sid3);
-    requestformat.SetString("username", username);
-    requestformat.SetString("ipv4", ipv4);
-    requestformat.SetString("map", g_mapname);
+    AnyHttpRequest req = AnyHttp.CreatePost(API_UPLOADPLAYERSINFO_URL);
+    req.PutString("apikey", API_SECRET_KEY);
+    req.PutString("address", g_publicIP);
+    req.PutString("steamid2", sid2);
+    req.PutString("steamid3", sid3);
+    req.PutString("username", username);
+    req.PutString("ipv4", ipv4);
+    req.PutString("map", g_mapname);
 
-    char jsonBuffer[512];
-    requestformat.ToString(jsonBuffer, sizeof(jsonBuffer));
-
-    HTTPRequest request = new HTTPRequest(API_UPLOADPLAYERSINFO_URL);
-    request.SetHeader("Authorization", "Bearer %s", API_SECRET_KEY); // Need api key to be authorized
-    request.SetHeader("Content-Type", "application/json");
-    request.Post(requestformat, HandleRequest);
-
-    delete requestformat;
+    AnyHttp.Send(req, HandleRequest);
 }
 
 /*
@@ -375,54 +352,47 @@ void UploadMapInfo() {
     // debug
     PrintToServer("[MatchaAPI] Uploading map info...");
 
-    // Upload Map name
-    JSONObject requestformat = new JSONObject();
-    requestformat.SetString("address", g_publicIP);
-    requestformat.SetString("map", g_mapname);
+    AnyHttpRequest req = AnyHttp.CreatePost(API_UPLOADSERVERINFO_URL);
+    req.PutString("apikey", API_SECRET_KEY);
+    req.PutString("address", g_publicIP);
+    req.PutString("map", g_mapname);
 
-    HTTPRequest request = new HTTPRequest(API_UPLOADSERVERINFO_URL);
-    request.SetHeader("Authorization", "Bearer %s", API_SECRET_KEY); // Need api key to be authorized
-    request.SetHeader("Content-Type", "application/json");
-
-    request.Post(requestformat, HandleRequest);
-
-    delete requestformat;
+    AnyHttp.Send(req, HandleRequest);
 }
 
 /*
     Endpoint: instance/uploadserverinfo
 */
 void UploadServerDetails(int sdr) {
-    JSONObject requestformat = new JSONObject();
-
     // debug
     PrintToServer("[MatchaAPI] Uploading server details...");
 
-    // 1 = sdr, 0 = no sdr
+    AnyHttpRequest req = AnyHttp.CreatePost(API_UPLOADSERVERINFO_URL);
+    req.PutString("hostname", g_hostname);
+    req.PutString("address", g_publicIP);
+    
+    char stvPortStr[6];
+    char rconPortStr[6];
+    Format(stvPortStr, sizeof(stvPortStr), "%d", g_stvPort);
+    Format(rconPortStr, sizeof(rconPortStr), "%d", g_rconPort);
+    
+    req.PutString("apikey", API_SECRET_KEY);
+    req.PutString("stv_port", stvPortStr);
+    req.PutString("rcon_port", rconPortStr);
+    req.PutString("sv_password", g_svpassword);
+    req.PutString("rcon_password", g_rconpassword);
+    req.PutString("map", g_mapname);
+
+    // Add SDR data if available
     if (sdr) {
-        requestformat.SetString("sdr_ipv4", g_sdrIP);
-        requestformat.SetInt("sdr_port", g_sdrPort);
+        // fking trim ts
+        TrimString(g_sdrPort);
+
+        req.PutString("sdr_ipv4", g_sdrIP);
+        req.PutString("sdr_port", g_sdrPort);
     }
 
-    requestformat.SetString("hostname", g_hostname);
-    requestformat.SetString("address", g_publicIP);
-    requestformat.SetInt("stv_port", g_stvPort);
-    requestformat.SetInt("rcon_port", g_rconPort);
-    requestformat.SetString("sv_password", g_svpassword);
-    requestformat.SetString("rcon_password", g_rconpassword);
-    requestformat.SetString("map", g_mapname);
-    requestformat.SetInt("players", g_playercount);
-
-    char jsonBuffer[1024];
-    requestformat.ToString(jsonBuffer, sizeof(jsonBuffer));
-    PrintToServer("[MatchaAPI] JSON Body: %s", jsonBuffer);
-
-    HTTPRequest request = new HTTPRequest(API_UPLOADSERVERINFO_URL);
-    request.SetHeader("Authorization", "Bearer %s", API_SECRET_KEY);
-    request.SetHeader("Content-Type", "application/json");
-    request.Post(requestformat, HandleRequest);
-
-    delete requestformat;
+    AnyHttp.Send(req, HandleRequest);
 }
 
 /*
@@ -432,66 +402,59 @@ void UpdateServerStatus(int status) {
     // debug
     PrintToServer("[MatchaAPI] Updating server status...");
 
-    JSONObject requestformat = new JSONObject();
-    requestformat.SetString("address", g_publicIP);
-    requestformat.SetInt("status", status);
+    AnyHttpRequest req = AnyHttp.CreatePost(API_UPDATESERVERSTATUS_URL);
+    req.PutString("address", g_publicIP);
+    
+    char statusStr[2];
+    Format(statusStr, sizeof(statusStr), "%d", status);
 
-    char jsonBuffer[256];
-    requestformat.ToString(jsonBuffer, sizeof(jsonBuffer));
-    PrintToServer("[MatchaAPI] JSON Body: %s", jsonBuffer);
+    req.PutString("apikey", API_SECRET_KEY);
+    req.PutString("status", statusStr);
 
-    HTTPRequest request = new HTTPRequest(API_UPDATESERVERSTATUS_URL);
-    request.SetHeader("Authorization", "Bearer %s", API_SECRET_KEY);
-    request.SetHeader("Content-Type", "application/json");
-    request.Post(requestformat, HandleRequest);
+    PrintToServer("[MatchaAPI] Sending status update");
 
-    delete requestformat;
+    AnyHttp.Send(req, HandleRequest);
 }
 
 /*
     Endpoint: instance/uploadgameinfo
 */
-void SendGamesInfo(int logid, const char[] logurl, int demoid, const char[] demourl) {
-    JSONObject requestformat = new JSONObject();
-    
+void SendGamesInfo(char[] logid, const char[] logurl, char[] demoid = "", const char[] demourl) {
     // debug
     PrintToServer("[MatchaAPI] Sending game info...");
 
-    requestformat.SetString("address", g_publicIP);
+    AnyHttpRequest req = AnyHttp.CreatePost(API_UPLOADGAMESINFO_URL);
+    req.PutString("apikey", API_SECRET_KEY);
+    req.PutString("address", g_publicIP);
+    req.PutString("logid", logid);
+    req.PutString("logurl", logurl);
 
-    // logid is the PK, therefore must be valid
-    requestformat.SetInt("logid", logid);
-    requestformat.SetString("logurl", logurl);
-
-    if (demoid > 0 && demourl) { // If demoid and url are valid
-        requestformat.SetInt("demoid", demoid);
-        requestformat.SetString("demourl", demourl);
+    // Add demo data if valid
+    if (demourl[0] != '\0') {
+        req.PutString("demoid", demoid);
+        req.PutString("demourl", demourl);
     }
 
-    HTTPRequest request = new HTTPRequest(API_UPLOADGAMESINFO_URL);
-
-    request.SetHeader("Authorization", "Bearer %s", API_SECRET_KEY); // Need api key to be authorized
-    request.SetHeader("Content-Type", "application/json");
-
-    request.Post(requestformat, HandleRequest);
+    AnyHttp.Send(req, HandleRequest);
 }
 
 /*
-    Callback for HTTP requests, don't need to read the response. Only the status
-    Documentation: https://forums.alliedmods.net/showthread.php?t=298024
+    Callback for HTTP requests
 */
-void HandleRequest(HTTPResponse response, any value) {
-    if (response.Status != HTTPStatus_OK) {
-        PrintToServer("[MatchaAPI] HTTP Request failed with status %d", response.Status);
-        JSONObject error = view_as<JSONObject>(response.Data);
-
-        char errorstring[256];
-        error.GetString("error", errorstring, sizeof(errorstring));
-        PrintToServer("[MatchaAPI] Error: %s", errorstring);
+void HandleRequest(bool success, const char[] contents, int responseCode) {
+    if (!success) {
+        PrintToServer("[MatchaAPI] HTTP request failed with response code: %d", responseCode);
         return;
     }
 
-    PrintToServer("[MatchaAPI] HTTP status: %d", response.Status);
+    // Debug
+    PrintToServer("[MatchaAPI] HTTP request successful with response code: %d", responseCode);
+
+    // If you need to handle the contents, you can do so here
+    // For now, we will just print it
+    if (strlen(contents) > 0) {
+        PrintToServer("[MatchaAPI] Response contents: %s", contents);
+    }
 }
 
 /*
@@ -503,8 +466,8 @@ void resetLogAndDemoStatus() {
     g_bLogRecentlyFailed = false;
     g_bDemoRecentlyFailed = false;
 
-    g_LogID = 0;
-    g_DemoID = 0;
+    g_LogID = "";
+    g_DemoID = "";
 
     g_LogURL = "";
     g_DemoURL = "";
@@ -513,10 +476,10 @@ void resetLogAndDemoStatus() {
 }
 
 void SetAFKTimer(){
-    if (g_playercount < MAX_AFK_PLAYERS && g_hAFKTimer == INVALID_HANDLE){
+    if (g_playerCount < MAX_AFK_PLAYERS && g_hAFKTimer == INVALID_HANDLE){
         g_hAFKTimer = CreateTimer(MAX_AFK_TIME, OnServerEmpty, _);
     }
-    if (g_playercount >= MAX_AFK_PLAYERS && g_hAFKTimer != INVALID_HANDLE){
+    if (g_playerCount >= MAX_AFK_PLAYERS && g_hAFKTimer != INVALID_HANDLE){
         CloseHandle(g_hAFKTimer);
         g_hAFKTimer = INVALID_HANDLE;
     }
@@ -554,6 +517,22 @@ bool IsCharInArray(char c, char[] array, int size) {
     return false;
 }
 
+/*
+    Return current players
+*/
+int GetPlayerCount() {
+    int count = 0;
+    for (int i = 1; i <= MaxClients; i++) {
+        if (IsClientInGame(i) && !IsFakeClient(i)) {
+            count++;
+        }
+    }
+    return count;
+}
+
+/*
+    Steamworks extension for retrieving public ipv4
+*/
 bool GetPublicIP(char[] buffer, int size){
     int ipaddr[4];
     SteamWorks_GetPublicIP(ipaddr);
@@ -567,23 +546,32 @@ bool GetPublicIP(char[] buffer, int size){
     }
 }
 
-void GetFakeIP(char[] buffer, int size){
-    if (!g_adrFakeIP) {
-        buffer[0] = '\0';
+/*
+    String separation for retrieving sdr
+*/
+bool GetFakeIP(char[] ip_buffer, int ip_size, char[] port_buffer, int port_size) {
+    /*
+        Kidnapped from https://github.com/spiretf/sdrconnect/blob/main/plugin/sdrconnect.sp
+    */
+    char serverIp[22];
+    char status[1024];
+    char lines[3][100]; // first 3 lines
+    char ips[8][50];
+    ServerCommandEx(status, sizeof(status), "status");
+    ExplodeString(status, "\n", lines, sizeof(lines), sizeof(lines[]));
+    ExplodeString(lines[2], " ", ips, sizeof(ips), sizeof(ips[]));
+    strcopy(serverIp, sizeof(serverIp), ips[3]);
+
+    if (StrEqual(serverIp, "?.?.?.?:?")) {
+        return false;
     }
-    int ipaddr = LoadFromAddress(g_adrFakeIP, NumberType_Int32);
 
-    int octet1 = (ipaddr >> 24) & 255;
-    int octet2 = (ipaddr >> 16) & 255;
-    int octet3 = (ipaddr >> 8) & 255;
-    int octet4 = ipaddr & 255;
+    // explode the string to separate the ip and port
+    char fakeipSeparate[2][16];
 
-    Format(buffer, size, "%d.%d.%d.%d", octet1, octet2, octet3, octet4);
-}
+    ExplodeString(serverIp, ":", fakeipSeparate, sizeof(fakeipSeparate), sizeof(fakeipSeparate[]));
+    strcopy(ip_buffer, ip_size, fakeipSeparate[0]);
+    strcopy(port_buffer, port_size, fakeipSeparate[1]);
 
-int GetFakePort(int num) {
-    if (!g_adrFakePorts || num < 0 || num >= 2){
-        return 0;
-    }
-    return LoadFromAddress(g_adrFakePorts + (num * 0x2), NumberType_Int16);
+    return true;
 }
