@@ -5,7 +5,7 @@
 #include <SteamWorks>
 #include <dbi>
 #include <morecolors>
-#include <anyhttp> // Thank you f2
+#include <anyhttp>
 
 // External natives
 #include <logstf>
@@ -231,7 +231,7 @@ public Action CMD_SdrRequest(int client, int args) {
     }
 
     MC_PrintToChat(client, 
-    "{aqua}connect %s:%s", g_sdrIP, g_sdrPort);
+    "{aqua}connect %s:%d; password \"%s\"", g_sdrIP, g_sdrPort, g_svpassword);
     return Plugin_Handled;
 }
 
@@ -288,17 +288,21 @@ public Action WaitForSteamInfo(Handle timer, int retry){
 
     if (gotIP && gotFakeIP){
         PrintToServer("[MatchaAPI] All conditions met, uploading server details (SDR=1) and updating status (START).");
+
         GetCvar();
+        UploadServerDetails(1); // Upload the details first before confirming
         UpdateServerStatus(API_START);
-        UploadServerDetails(1);
+        
         SetAFKTimer();
         
         return Plugin_Stop;
     }
     else if (g_retry == MAX_SDR_RETRIES){
         PrintToServer("[MatchaAPI] Max SDR retries reached, uploading server details (SDR=0).");
+
         GetCvar();
         UploadServerDetails(0);
+        UpdateServerStatus(API_START);
         SetAFKTimer();
         
         return Plugin_Stop;
@@ -439,7 +443,8 @@ void SendGamesInfo(char[] logid, const char[] logurl, char[] demoid = "", const 
 }
 
 /*
-    Callback for HTTP requests
+    Callback for HTTP requests, don't need to read the response. Only the status
+    Documentation: https://forums.alliedmods.net/showthread.php?t=298024
 */
 void HandleRequest(bool success, const char[] contents, int responseCode) {
     if (!success) {
