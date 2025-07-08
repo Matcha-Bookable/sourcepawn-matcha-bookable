@@ -291,7 +291,6 @@ public Action WaitForSteamInfo(Handle timer, int retry){
 
         GetCvar();
         UploadServerDetails(1); // Upload the details first before confirming
-        UpdateServerStatus(API_START);
         
         SetAFKTimer();
         
@@ -302,7 +301,7 @@ public Action WaitForSteamInfo(Handle timer, int retry){
 
         GetCvar();
         UploadServerDetails(0);
-        UpdateServerStatus(API_START);
+        
         SetAFKTimer();
         
         return Plugin_Stop;
@@ -396,7 +395,7 @@ void UploadServerDetails(int sdr) {
         req.PutString("sdr_port", g_sdrPort);
     }
 
-    AnyHttp.Send(req, HandleRequest);
+    AnyHttp.Send(req, HandleRequestReady);
 }
 
 /*
@@ -444,7 +443,6 @@ void SendGamesInfo(char[] logid, const char[] logurl, char[] demoid = "", const 
 
 /*
     Callback for HTTP requests, don't need to read the response. Only the status
-    Documentation: https://forums.alliedmods.net/showthread.php?t=298024
 */
 void HandleRequest(bool success, const char[] contents, int responseCode) {
     if (!success) {
@@ -459,6 +457,24 @@ void HandleRequest(bool success, const char[] contents, int responseCode) {
     // For now, we will just print it
     if (strlen(contents) > 0) {
         PrintToServer("[MatchaAPI] Response contents: %s", contents);
+    }
+}
+
+/*
+    Callback for uploading server info before confirming its ready
+*/
+void HandleRequestReady(bool success, const char[] contents, int responseCode) {
+    if (strlen(contents) > 0) {
+        PrintToServer("[MatchaAPI] Response contents: %s", contents);
+    }
+    
+    if (responseCode == 200) {
+        UpdateServerStatus(API_START); // Sends the ready status after its updated
+        PrintToServer("[MatchaAPI] HTTP request successful with response code: %d", responseCode);
+    }
+    else {
+        UpdateServerStatus(API_STOP);
+        PrintToServer("[MatchaAPI] HTTP request failed with response code: %d", responseCode);
     }
 }
 
