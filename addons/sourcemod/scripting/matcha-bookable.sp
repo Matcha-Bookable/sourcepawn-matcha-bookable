@@ -148,6 +148,7 @@ public void LogUploaded(bool success, const char[] logid, const char[] url) {
     g_bLogUploaded = true;
     g_bLogRecentlyFailed = false;
     strcopy(g_LogID, sizeof(g_LogID), logid);
+    strcopy(g_LogURL, sizeof(g_LogURL), url);
 
     if (g_bDemoRecentlyFailed) { // Demo attempted but failed 
         SendGamesInfo(g_LogID, g_LogURL, _, "");
